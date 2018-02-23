@@ -1,4 +1,5 @@
 #include "potato.h"
+#include <time.h>
 
 void link_player(int *sockfd, int n_players, int r_port) {
   char b[] = "begin";
@@ -26,6 +27,7 @@ void link_player(int *sockfd, int n_players, int r_port) {
       exit(EXIT_FAILURE);
     }
     if(!strncmp(s, temp, strlen(s))) {
+      //printf("successful link! sockfd is %d\n", sockfd[i]);
       continue;
     }
     else{
@@ -34,12 +36,12 @@ void link_player(int *sockfd, int n_players, int r_port) {
       exit(EXIT_FAILURE);
     }
   }
-  printf("successful link!\n");
+  //printf("successful link!\n");
 }
 
 void send_rt_ps_info(int *sockfd, struct sockaddr_in * ps_info_arr, int n_players, int r_port){
   for(int i = 0; i < n_players; i++) {
-    printf("send information\n");
+    //printf("send information\n");
     int rc = 0;
     while(rc != sizeof(struct sockaddr_in)) {
       rc = rc + send(sockfd[i], &ps_info_arr[(i+1)% n_players], sizeof(struct sockaddr_in), 0);
@@ -50,8 +52,9 @@ void send_rt_ps_info(int *sockfd, struct sockaddr_in * ps_info_arr, int n_player
       exit(EXIT_FAILURE);
     }
   }
-  printf("Ringmaster sets successfully\n");
+  //printf("Ringmaster sets successfully\n");
 } 
+
 
 struct sockaddr_in * receive_players_info(int *sockfd, int n_players, int r_port) {
   struct sockaddr_in * ps_info_arr = (struct sockaddr_in *)malloc(n_players * sizeof(struct sockaddr_in));
@@ -86,8 +89,8 @@ void split_command(int n_arg, char *arg[], int * p_port, int * p_players, int * 
     exit(EXIT_FAILURE);
   }
   *p_hops = atoi(arg[3]);
-  if(*p_hops < 0) {
-    fprintf(stderr, "Error: Invalid number of hops!\n");
+  if(*p_hops < 0 || *p_hops > 512) {
+    fprintf(stderr, "Error: the number of hops must be from 0 to 512!\n");
     exit(EXIT_FAILURE);
   }
 }
@@ -166,28 +169,178 @@ void accept_connect(int *sockfd, p_player *p, int n_players, int rm_socket, int 
   }
 }
 
+void exit_clean(int * sockfd, int n_players, int r_port, int rm_socket){
+  char e[] = "exit";
+  char c[] = "clean";
+  for(int i = 0; i < n_players; i++) {
+    if(send(sockfd[i], e, strlen(e), 0) < 0){
+      fprintf(stderr, "send exit signal fails!\n");
+      close(rm_socket);
+      close(r_port);
+      exit(EXIT_FAILURE);
+    }
+    /*if(send(sockfd[i], c, strlen(c), 0) < 0){
+      fprintf(stderr, "send close signal fails!\n");
+      close(rm_socket);
+      close(r_port);
+      exit(EXIT_FAILURE);
+      }*/
+  }
+}
+
+void dont_play_game(int rm_socket, int n_players,int n_hops, int r_port, int * sockfd){
+  exit_clean(sockfd, n_players, r_port, rm_socket);
+  printf("Trace of potato: \n");  
+}
+
+void potato2player(fd_set readfds, int * sockfd, int *potato,int n_players, int n_hops, int r_port, int rm_socket) {
+  char h[] = "head";
+  srand( (unsigned int) time(NULL) );
+  int random= rand()% n_players;
+  printf("Ready to start the game, sending potato to player: %d\n", random);
+  if(send(sockfd[random], h, strlen(h), 0) < 0){
+    fprintf(stderr, "send initialization fails!\n");
+    close(rm_socket);
+    close(r_port);
+    exit(EXIT_FAILURE);
+  }
+  if(send(sockfd[random], potato, sizeof(int)*n_hops, 0) < 0){
+    fprintf(stderr, "send potato fails!\n");
+    close(rm_socket);
+    close(r_port);
+    exit(EXIT_FAILURE);
+  }
+}
+
+void print_trace(int * potato, int n_hops) {
+  printf("Trace of potato: \n");
+  int i;
+  for(i = 0; i < n_hops - 1; i++) {
+    printf("%d(i = %d), ", potato[i], i);
+  }
+  printf("%d(i = %d)\n", potato[i], i);
+}
+
+void play_game(int n_players, int n_hops, int r_port, int rm_socket, int * sockfd, int * potato) {
+  int i;
+  fd_set readfds;
+  FD_ZERO(&readfds);
+  for(int i = 0; i < n_players; i++){
+    FD_SET(sockfd[i], &readfds);
+  }
+  
+  potato2player(readfds, sockfd, potato, n_players, n_hops, r_port, rm_socket);
+
+  //search the end player
+  if(select(65535, &readfds, NULL, NULL, NULL) < 0) {
+    fprintf(stderr, "select mode fails!\n");
+    close(rm_socket);
+    close(r_port);
+    exit(EXIT_FAILURE);
+  }
+  for(i = 0; i < n_players; i++) {
+    if(FD_ISSET(sockfd[i],&readfds)){
+      FD_CLR(sockfd[i], &readfds);
+      break;
+    }
+  }
+  int rc = 0;
+  while(rc!= (n_hops) * sizeof(int)) {
+    rc = rc + recv(sockfd[i], potato + rc/sizeof(int), n_hops*sizeof(int), 0);
+  }
+  if(rc < 0){
+    fprintf(stderr, "receive potato trace fails!\n");
+    close(r_port);
+    close(rm_socket);
+    exit(EXIT_FAILURE);
+  }
+  exit_clean(sockfd, n_players, r_port, rm_socket);
+  print_trace(potato, n_hops);
+}
+
 int main(int argc, char *argv[]){
   int r_port, n_players, n_hops; //ringmaster server port
-  int rm_socket;
+  int rm_socket; //ringmaster socket
   char hostname[100];
+  
   split_command(argc, argv, &r_port, &n_players, &n_hops);
-  int sockfd[n_players];
-  p_player p[n_players];
+
+  int sockfd[n_players]; //players' socket
+  p_player p[n_players]; //player informtion
+  
+  int potato[n_hops];
+  memset(potato, -1, n_hops * sizeof(int));
+
   struct hostent *ringmaster = NULL;
   struct sockaddr_in player_addr_info;
   struct sockaddr_in *ps_info_arr = NULL;
+
   ringmaster = get_host_info(hostname, ringmaster, sizeof(hostname));
-  printf("Potato master on %s\n", hostname);
+  
+  printf("Potato Ringmaster");
   printf("Players = %d \n", n_players);
   printf("Hops = %d\n", n_hops);
-  setup_ringmaster(&rm_socket, ringmaster, r_port);
-  accept_connect(sockfd, p, n_players, rm_socket, r_port, n_hops);
-  ps_info_arr = receive_players_info(sockfd, n_players, r_port);
-  send_rt_ps_info(sockfd, ps_info_arr, n_players, r_port);
+
+  setup_ringmaster(&rm_socket, ringmaster, r_port); // initialize ringmaster as server
+  accept_connect(sockfd, p, n_players, rm_socket, r_port, n_hops); //waiting players(clients) connect
+  ps_info_arr = receive_players_info(sockfd, n_players, r_port); // get players address.. from players
+  send_rt_ps_info(sockfd, ps_info_arr, n_players, r_port);  //send player address.. of its right neighbor
   link_player(sockfd, n_players, r_port);
-  //initiate_ring(sockfd);
-  //printf("3.%s\n", inet_ntoa(ringmaster_info.sin_addr));
-  //printf("rm_socket = %d", rm_socket);
+  
+  if(n_hops == 0){ // no game
+    dont_play_game(rm_socket, n_players, n_hops, r_port, sockfd);
+  }
+  else{
+    int i;
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    for(int i = 0; i < n_players; i++){
+      FD_SET(sockfd[i], &readfds);
+    }
+    char h[] = "head";
+    srand( (unsigned int) time(NULL) );
+    int random= rand()% n_players;
+
+    //send potato to random
+    printf("Ready to start the game, sending potato to player: %d\n", random);
+    if(send(sockfd[random], h, strlen(h), 0) < 0){ // first player siganl
+      fprintf(stderr, "send initialization fails!\n");
+      close(rm_socket);
+      exit(EXIT_FAILURE);
+    }
+    if(send(sockfd[random], potato, sizeof(int)*n_hops, 0) < 0){ //send potato
+      fprintf(stderr, "send potato fails!\n");
+      close(rm_socket);
+      exit(EXIT_FAILURE);
+    }
+    
+    //wait signal to end the game
+    if(select(65535, &readfds, NULL, NULL, NULL) < 0) {
+      fprintf(stderr, "select mode fails!\n");
+      close(rm_socket);
+      exit(EXIT_FAILURE);
+    }
+    for(i = 0; i < n_players; i++) {
+      if(FD_ISSET(sockfd[i],&readfds)){
+	FD_CLR(sockfd[i], &readfds);
+	break;
+      }
+    }
+    int rc = 0;
+    while(rc!= (n_hops) * sizeof(int)) {
+      rc = rc + recv(sockfd[i], potato + rc/sizeof(int), n_hops*sizeof(int), 0);
+    }
+    if(rc < 0){
+      fprintf(stderr, "receive potato trace fails!\n");
+      close(r_port);
+      close(rm_socket);
+      exit(EXIT_FAILURE);
+    }
+    exit_clean(sockfd, n_players, r_port, rm_socket);
+    print_trace(potato, n_hops);
+    
+    //play_game(n_players, n_hops, r_port, rm_socket, sockfd, potato);
+  }
   for(int i = 0; i < n_players; i++) {
     free(p[i]);
   }
